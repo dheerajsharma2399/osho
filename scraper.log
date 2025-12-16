@@ -1,0 +1,18 @@
+ Successfully saved to output\A Bird On The Wing.json
+(.venv) PS C:\Users\terag\OneDrive\Desktop\osho> python scrape_discourses.py --workers 4 --count 1
+Starting ThreadPoolExecutor with 4 workers.
+Worker processing discourse 002: A Sudden Clash Of Thunder
+Creating new Chrome driver instance...
+Chrome driver instance created.
+  Scraping chapter 002001: https://oshoworld.com/a-sudden-clash-of-thunder-01
+  Scraping chapter 002002: https://oshoworld.com/a-sudden-clash-of-thunder-02
+  Scraping chapter 002003: https://oshoworld.com/a-sudden-clash-of-thunder-03
+  Scraping chapter 002004: https://oshoworld.com/a-sudden-clash-of-thunder-04
+  Scraping chapter 002005: https://oshoworld.com/a-sudden-clash-of-thunder-05
+  Scraping chapter 002006: https://oshoworld.com/a-sudden-clash-of-thunder-06
+  Scraping chapter 002007: https://oshoworld.com/a-sudden-clash-of-thunder-07
+  Scraping chapter 002008: https://oshoworld.com/a-sudden-clash-of-thunder-08
+  Scraping chapter 002009: https://oshoworld.com/a-sudden-clash-of-thunder-09
+  Scraping chapter 002010: https://oshoworld.com/a-sudden-clash-of-thunder-10
+  Successfully saved to output\A Sudden Clash Of Thunder.json
+(.venv) PS C:\Users\terag\OneDrive\Desktop\osho> 
