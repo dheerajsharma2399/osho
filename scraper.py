@@ -2,10 +2,9 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Optional
 import argparse
 from concurrent.futures import ProcessPoolExecutor
-from functools import partial
 import os
 
 from selenium import webdriver
@@ -42,7 +41,6 @@ ENABLE_JAVASCRIPT = True         # Load JavaScript (needed for some sites)
 
 
 PROGRESS_FILE = "progress.json"
-CHROMEDRIVER_PATH = None  # Will be set once in main
 
 
 def load_progress():
@@ -108,7 +106,6 @@ def make_driver(chromedriver_path):
     options.add_experimental_option("prefs", prefs)
     
     # Set page load strategy to 'none' for maximum speed
-    # This doesn't wait for page load to complete
     options.page_load_strategy = 'none'
     
     try:
@@ -135,8 +132,9 @@ def accept_cookies(driver):
         pass  # ignore if not found
 
 
-def extract_chapter(driver, url: str) -> Dict:
-    """Extract chapter content from URL - ULTRA-FAST MODE"""
+def extract_chapter(driver, url: str, discourse_name: str = "") -> Dict:
+    """Extract chapter content from URL with smart filtering for transcripts"""
+    
     for attempt in range(MAX_RETRIES):
         try:
             print(f"[PID {os.getpid()}] Loading URL (attempt {attempt + 1}/{MAX_RETRIES}): {url}")
@@ -156,13 +154,12 @@ def extract_chapter(driver, url: str) -> Dict:
                     EC.presence_of_element_located((By.TAG_NAME, "body"))
                 )
             
-            # WAIT POINT 3: Handle cookie consent (only on first chapter)
-            if attempt == 0:  # Only try on first attempt
+            # WAIT POINT 3: Handle cookie consent (only on first attempt ideally, handled here for simplicity)
+            if attempt == 0:
                 accept_cookies(driver)
             
             # WAIT POINT 4: Additional static wait (OPTIONAL - skip if 0)
             if WAIT_DYNAMIC_CONTENT > 0:
-                print(f"[PID {os.getpid()}] ⏳ Waiting for dynamic content ({WAIT_DYNAMIC_CONTENT}s)...")
                 time.sleep(WAIT_DYNAMIC_CONTENT)
 
             # WAIT POINT 5: Wait for main content elements (OPTIONAL - skip if 0)
@@ -174,21 +171,14 @@ def extract_chapter(driver, url: str) -> Dict:
                     (By.ID, 'content'),
                     (By.ID, 'main')
                 ]
-                
-                waited_for_content = False
                 for selector_type, selector_value in content_selectors_for_wait:
                     try:
                         WebDriverWait(driver, WAIT_CONTENT_ELEMENT).until(
                             EC.presence_of_element_located((selector_type, selector_value))
                         )
-                        waited_for_content = True
-                        print(f"[PID {os.getpid()}] ✓ Content element found: {selector_value}")
                         break
                     except TimeoutException:
                         continue
-                        
-                if not waited_for_content:
-                    print(f"[PID {os.getpid()}] ⚠ Warning: No content element found for {url}")
             
             # Now safe to extract HTML - all waits completed
             html = driver.page_source
@@ -198,22 +188,18 @@ def extract_chapter(driver, url: str) -> Dict:
             print(f"[PID {os.getpid()}] ⏱ Timeout on attempt {attempt + 1}: {e}")
             if attempt == MAX_RETRIES - 1:
                 raise
-            # WAIT POINT 6: Retry delay
-            print(f"[PID {os.getpid()}] ⏳ Retrying in {WAIT_RETRY_DELAY}s...")
             time.sleep(WAIT_RETRY_DELAY)
         except Exception as e:
             print(f"[PID {os.getpid()}] ❌ Error on attempt {attempt + 1}: {e}")
             if attempt == MAX_RETRIES - 1:
                 raise
-            # WAIT POINT 7: Retry delay
-            print(f"[PID {os.getpid()}] ⏳ Retrying in {WAIT_RETRY_DELAY}s...")
             time.sleep(WAIT_RETRY_DELAY)
 
     # ═══════════════════════════════════════════════════════════════════
     # ALL WAITING IS COMPLETE - NOW EXTRACTING DATA FROM LOADED PAGE
     # ═══════════════════════════════════════════════════════════════════
     
-    # EXTRACTION PHASE 1: Title extraction (no waiting, immediate extraction)
+    # EXTRACTION PHASE 1: Title
     print(f"[PID {os.getpid()}] 📝 Extracting title...")
     title = ''
     try:
@@ -229,14 +215,10 @@ def extract_chapter(driver, url: str) -> Dict:
     except Exception:
         title = ''
     if not title:
-        try:
-            og = driver.find_element(By.CSS_SELECTOR, 'meta[property="og:title"]')
-            title = (og.get_attribute('content') or '').strip()
-        except Exception:
-            title = (driver.title or '').strip()
+        title = (driver.title or '').strip()
     print(f"[PID {os.getpid()}]   └─ Title: {title[:50]}...")
 
-    # EXTRACTION PHASE 2: MP3 links (no waiting, immediate extraction)
+    # EXTRACTION PHASE 2: MP3 links
     print(f"[PID {os.getpid()}] 🎵 Extracting MP3 links...")
     mp3_links: List[str] = []
     try:
@@ -257,7 +239,7 @@ def extract_chapter(driver, url: str) -> Dict:
         pass
     print(f"[PID {os.getpid()}]   └─ Found {len(mp3_links)} MP3 link(s)")
 
-    # EXTRACTION PHASE 3: Image URL (no waiting, immediate extraction)
+    # EXTRACTION PHASE 3: Image URL
     print(f"[PID {os.getpid()}] 🖼️  Extracting image URL...")
     image_url = ''
     try:
@@ -273,23 +255,20 @@ def extract_chapter(driver, url: str) -> Dict:
                     break
         except Exception:
             image_url = ''
-    if image_url:
-        print(f"[PID {os.getpid()}]   └─ Image URL found")
 
-    # EXTRACTION PHASE 4: Duration (no waiting, regex on already-loaded HTML)
+    # EXTRACTION PHASE 4: Duration
     print(f"[PID {os.getpid()}] ⏱️  Extracting duration...")
     duration = ''
     m = re.search(r'\b\d{1,2}:\d{2}:\d{2}\b', html)
     if m:
         duration = m.group(0)
-        print(f"[PID {os.getpid()}]   └─ Duration: {duration}")
 
-   # EXTRACTION PHASE 5: Transcript (Smart Filters)
+    # EXTRACTION PHASE 5: Transcript (Smart Filters with Discourse Name)
     print(f"[PID {os.getpid()}] 📄 Extracting transcript...")
     transcript_lines = []
     soup = BeautifulSoup(html, 'html.parser')
 
-    # 1. EXPANDED BLACKLIST (Exact matches to ignore)
+    # 1. FIXED BLACKLIST
     BANNED_PHRASES = {
         "Home", "OSHO", "About Osho", "Osho Biography", "Osho on Mystic", 
         "Osho Photo Gallery", "Osho Dham", "Upcoming Events", "Meditation Programs",
@@ -299,10 +278,11 @@ def extract_chapter(driver, url: str) -> Dict:
         "Osho Art News", "Shop", "Pearls", "Music", "Magazine", "Tarot", "FAQ",
         "Login", "Share", "Whatsapp", "Facebook", "Instagram", "X", "Gmail",
         "Pinterest", "Copied !", "Language :", "Download", "UP NEXT", "Previous",
-        "Next", "Related", "Menu", "Search", "0", "/", "#", "english", "hindi"
+        "Next", "Related", "Menu", "Search", "0", "/", "#", "english", "hindi",
+        "Description", "ZEN AND ZEN MASTERS", "Zen and Zen Masters"
     }
 
-    # 2. Find the Content Container
+    # 2. Find Content
     content_selectors = [
         '.entry-content', '.post-content', '.td-post-content', '.tdb-block-inner',
         'article', '.main-content', '#content', '#main'
@@ -320,11 +300,11 @@ def extract_chapter(driver, url: str) -> Dict:
         content_element = soup.body
 
     if content_element:
-        # 3. Structural Cleaning (Remove navigation, sidebars, playlists)
+        # 3. Structural Cleaning
+        # Remove navigation, sidebars, header, footer, etc.
         for tag in content_element(['script', 'style', 'noscript', 'nav', 'aside', 'header', 'footer', 'iframe', 'form', 'button', 'input']):
             tag.decompose()
 
-        # Remove playlist/download/widget containers specifically
         garbage_selectors = [
             '.share', '.social', '.widget', '.sidebar', '.related-posts', 
             '.navigation', '.meta', '.tags', '.playlist', '.tracklist', 
@@ -335,10 +315,21 @@ def extract_chapter(driver, url: str) -> Dict:
                 junk.decompose()
 
         # 4. Extract Text
+        # Use separator='\n' to ensure block elements are split by newlines
         raw_text = content_element.get_text(separator='\n', strip=True)
         
         # 5. SMART FILTERING
         lines = raw_text.split('\n')
+        
+        # Create a regex to match the discourse name + optional numbers
+        name_pattern = None
+        if discourse_name:
+            # Matches: "Bodhidharma", "Bodhidharma 01", "Bodhidharma 05" (Case Insensitive)
+            try:
+                name_pattern = re.compile(r'^' + re.escape(discourse_name) + r'\s*\d*$', re.IGNORECASE)
+            except Exception:
+                pass
+
         for line in lines:
             clean_line = line.strip()
             
@@ -350,28 +341,26 @@ def extract_chapter(driver, url: str) -> Dict:
             if clean_line in BANNED_PHRASES:
                 continue
             
-            # B. Check Timestamps (e.g. 01:54:11, 00:00:00)
-            # This regex matches strict time formats
+            # B. Check Dynamic Discourse Name Filter
+            if name_pattern and name_pattern.match(clean_line):
+                continue
+            
+            # C. Check Timestamps (01:54:11, 00:00:00)
             if re.match(r'^\d{2}:\d{2}:\d{2}$', clean_line) or re.match(r'^\d{2}:\d{2}$', clean_line):
                 continue
 
-            # C. Check Copyright / Generic Metadata
+            # D. Check Copyright
             if "Copyright" in clean_line and "Osho" in clean_line:
                 continue
-            
-            # D. Check for "Playlist" style repetition
-            # If the line contains the main Title (e.g. "Bodhidharma") AND a digit (e.g. "01"), it's likely a playlist link
-            # But we must be careful not to delete "Question 1"
-            if title and len(title) > 5 and title.lower() in clean_line.lower():
-                 # It mentions the book title. Is it a chapter listing?
-                 # If it ends with a number (like "Title 01", "Title 02"), ignore it.
-                 if re.search(r'\d{2}$', clean_line): 
-                     continue
+                
+            # E. Check for ALL CAPS short headers (often category names)
+            if len(clean_line) < 50 and clean_line.isupper() and not clean_line.endswith(('.', '?', '!')):
+                continue
 
-            # If we survived all filters, accept it.
+            # If it passes, keep it
             transcript_lines.append(clean_line)
 
-    # Remove duplicates
+    # Remove duplicates while preserving order
     seen = set()
     transcript_paragraphs = [x for x in transcript_lines if not (x in seen or seen.add(x))]
 
@@ -387,7 +376,7 @@ def extract_chapter(driver, url: str) -> Dict:
         'mp3_links': list(dict.fromkeys(mp3_links)),
         'image_url': image_url,
         'duration': duration,
-        'transcript': transcript_paragraphs,  # Will be None if no transcript found
+        'transcript': transcript_paragraphs,
     }
     return chapter
 
@@ -409,7 +398,9 @@ def process_chapter(chapter_task):
         driver = make_driver(chromedriver_path)
         print(f"[PID {pid}] 🌐 Scraping: {chapter_url}")
         
-        chapter_details = extract_chapter(driver, chapter_url)
+        # Pass discourse_name to extract_chapter for filtering
+        chapter_details = extract_chapter(driver, chapter_url, discourse_name)
+        
         chapter_details["id"] = chapter_id
         chapter_details["discourse_index"] = discourse_index
         chapter_details["chapter_index"] = chapter_index
@@ -478,18 +469,9 @@ def main(count, workers):
     print("🔧 SCRAPER CONFIGURATION")
     print("="*80)
     print(f"MODE                    : {'🚀 ULTRA-FAST (Static Sites)' if WAIT_DOCUMENT_READY == 0 else 'Normal'}")
-    print(f"WAIT_DOCUMENT_READY     : {WAIT_DOCUMENT_READY}s {'(SKIPPED)' if WAIT_DOCUMENT_READY == 0 else ''}")
+    print(f"WAIT_DOCUMENT_READY     : {WAIT_DOCUMENT_READY}s")
     print(f"WAIT_COOKIE_POPUP       : {WAIT_COOKIE_POPUP}s")
-    print(f"WAIT_DYNAMIC_CONTENT    : {WAIT_DYNAMIC_CONTENT}s {'(SKIPPED)' if WAIT_DYNAMIC_CONTENT == 0 else ''}")
-    print(f"WAIT_CONTENT_ELEMENT    : {WAIT_CONTENT_ELEMENT}s {'(SKIPPED)' if WAIT_CONTENT_ELEMENT == 0 else ''}")
-    print(f"WAIT_RETRY_DELAY        : {WAIT_RETRY_DELAY}s")
-    print(f"PAGE_LOAD_TIMEOUT       : {PAGE_LOAD_TIMEOUT}s")
-    print(f"SCRIPT_TIMEOUT          : {SCRIPT_TIMEOUT}s")
-    print(f"MAX_RETRIES             : {MAX_RETRIES}")
     print(f"WORKERS                 : {workers}")
-    print(f"ENABLE_IMAGES           : {ENABLE_IMAGES}")
-    print(f"ENABLE_CSS              : {ENABLE_CSS}")
-    print(f"ENABLE_JAVASCRIPT       : {ENABLE_JAVASCRIPT}")
     print("="*80 + "\n")
     
     # Initialize ChromeDriver once before spawning processes
@@ -501,8 +483,12 @@ def main(count, workers):
         print(f"❌ Failed to initialize ChromeDriver: {e}")
         return
     
-    with open("chapter_links.json", "r", encoding="utf-8") as f:
-        all_discourses = json.load(f)
+    try:
+        with open("chapter_links.json", "r", encoding="utf-8") as f:
+            all_discourses = json.load(f)
+    except FileNotFoundError:
+        print("❌ Error: chapter_links.json not found.")
+        return
 
     out_dir = Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -571,7 +557,6 @@ def main(count, workers):
     # Save each discourse
     saved_count = 0
     total_chapters_with_transcript = 0
-    total_chapters_without_transcript = 0
     
     for discourse_index, discourse in discourses_to_process:
         if discourse_index in discourse_chapters:
@@ -580,9 +565,7 @@ def main(count, workers):
             
             # Count transcript stats
             with_transcript = sum(1 for ch in chapters if ch.get('transcript'))
-            without_transcript = sum(1 for ch in chapters if not ch.get('transcript'))
             total_chapters_with_transcript += with_transcript
-            total_chapters_without_transcript += without_transcript
             
             # Remove temporary fields
             for ch in chapters:
@@ -595,20 +578,6 @@ def main(count, workers):
             saved_count += 1
         else:
             print(f"⚠️  No chapters found for discourse {discourse_index + 1}: {discourse['discourse_name']}")
-
-    successful_chapters = len([r for r in chapter_results if r is not None])
-    
-    print("\n" + "="*80)
-    print("🎉 FINAL SUMMARY")
-    print("="*80)
-    print(f"Discourses saved     : {saved_count}/{len(discourses_to_process)}")
-    print(f"Chapters scraped     : {successful_chapters}/{len(chapter_tasks)}")
-    print(f"With transcripts     : {total_chapters_with_transcript}")
-    print(f"Without transcripts  : {total_chapters_without_transcript}")
-    if successful_chapters > 0:
-        coverage = (total_chapters_with_transcript / successful_chapters) * 100
-        print(f"Transcript coverage  : {coverage:.1f}%")
-    print("="*80 + "\n")
 
 
 if __name__ == '__main__':
