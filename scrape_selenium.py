@@ -24,49 +24,82 @@ def make_driver(headless=True):
     return driver
 
 
+def accept_cookies(driver):
+    try:
+        accept_button = WebDriverWait(driver, 5).until(
+            EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept')]"))
+        )
+        accept_button.click()
+        time.sleep(1)
+    except Exception:
+        pass # ignore if not found
+
+
 def find_chapter_links(driver, list_url: str) -> List[str]:
     driver.get(list_url)
     WebDriverWait(driver, 10).until(lambda d: d.execute_script('return document.readyState') == 'complete')
+    accept_cookies(driver)
     base = '/'.join(list_url.split('/')[:3])
     slug = list_url.rstrip('/').split('/')[-1].split('#')[0]
     prefix = re.sub(r'-by-.*$', '', slug)
     links: List[str] = []
 
-    # 1) Prefer explicit links inside any table (series/episode tables)
-    try:
-        table_anchors = driver.find_elements(By.CSS_SELECTOR, 'table a[href]')
-        for a in table_anchors:
-            href = a.get_attribute('href')
-            if href and href.startswith(base) and href not in links:
-                links.append(href)
-    except Exception:
-        pass
+    while True:
+        # Scroll down to load all content on the current page
+        last_height = driver.execute_script("return document.body.scrollHeight")
+        for _ in range(5):
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+            new_height = driver.execute_script("return document.body.scrollHeight")
+            if new_height == last_height:
+                break
+            last_height = new_height
 
-    # 2) Next, look for anchors that match the series prefix like '/{prefix}-<number>'
-    try:
-        anchors = driver.find_elements(By.CSS_SELECTOR, "a[href]")
-        pat = re.compile(rf'/{re.escape(prefix)}-\d+')
-        for a in anchors:
-            href = a.get_attribute('href')
-            if not href or not href.startswith(base):
-                continue
-            if href in links:
-                continue
-            if pat.search(href):
-                links.append(href)
-    except Exception:
-        pass
-
-    # 3) Fallback: any internal links (keeps previous behavior)
-    if not links:
+        # 1) Prefer explicit links inside any table (series/episode tables)
         try:
-            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href]")
-            for a in anchors:
+            table_anchors = driver.find_elements(By.CSS_SELECTOR, 'table a[href]')
+            for a in table_anchors:
                 href = a.get_attribute('href')
                 if href and href.startswith(base) and href not in links:
                     links.append(href)
         except Exception:
             pass
+
+        # 2) Next, look for anchors that match the series prefix like '/{prefix}-<number>'
+        try:
+            anchors = driver.find_elements(By.CSS_SELECTOR, "a[href]")
+            pat = re.compile(rf'/{re.escape(prefix)}-\d+')
+            for a in anchors:
+                href = a.get_attribute('href')
+                if not href or not href.startswith(base):
+                    continue
+                if href in links:
+                    continue
+                if pat.search(href):
+                    links.append(href)
+        except Exception:
+            pass
+
+        # 3) Fallback: any internal links (keeps previous behavior)
+        if not links:
+            try:
+                anchors = driver.find_elements(By.CSS_SELECTOR, "a[href]")
+                for a in anchors:
+                    href = a.get_attribute('href')
+                    if href and href.startswith(base) and href not in links:
+                        links.append(href)
+            except Exception:
+                pass
+        
+        # pagination
+        try:
+            next_button = driver.find_element(By.XPATH, "//a[contains(text(), 'Next')]")
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", next_button)
+            time.sleep(1)
+            next_button.click()
+            time.sleep(2) # wait for page to load
+        except Exception:
+            break
 
     return links
 
@@ -86,6 +119,7 @@ def filter_out_assets(urls: List[str]) -> List[str]:
 def extract_chapter(driver, url: str) -> Dict:
     driver.get(url)
     WebDriverWait(driver, 15).until(lambda d: d.execute_script('return document.readyState') == 'complete')
+    accept_cookies(driver)
     time.sleep(0.6)
     html = driver.page_source
 
@@ -268,21 +302,10 @@ def extract_chapter(driver, url: str) -> Dict:
             transcript_full = ''
 
     # Split transcript into paragraphs for caption generation
-    # Split on double newlines first (major breaks), then on single newlines (minor breaks)
     transcript_paragraphs = []
     if transcript_full:
-        # Split on double newlines (major paragraph breaks)
-        major_paras = transcript_full.split('\n\n')
-        for para in major_paras:
-            if para.strip():
-                # Further split on single newlines if paragraph is too long
-                if len(para) > 200:
-                    minor_paras = para.split('\n')
-                    for minor in minor_paras:
-                        if minor.strip():
-                            transcript_paragraphs.append(minor.strip())
-                else:
-                    transcript_paragraphs.append(para.strip())
+        # Split by one or more newlines
+        transcript_paragraphs = [p.strip() for p in re.split(r'\n+', transcript_full) if p.strip()]
 
     # assemble
     chapter = {
@@ -334,45 +357,63 @@ def save_discourse_json(discourse_name: str, discourse_url: str, chapters: List[
 
 
 def main():
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument('list_url', help='Discourse/list page URL (e.g. series page)')
-    parser.add_argument('--headless', action='store_true', help='Run chrome headless')
-    parser.add_argument('--out', default='.', help='Output directory for json files')
-    parser.add_argument('--limit', type=int, default=0, help='Limit number of chapters (0 = all)')
-    args = parser.parse_args()
+    # Load all series
+    hindi_series = []
+    with open("hindi-names.json", "r", encoding="utf-8") as f:
+        hindi_series = json.load(f)
 
-    out_dir = Path(args.out)
+    english_series = []
+    with open("eng-names.json", "r", encoding="utf-8") as f:
+        english_series = json.load(f)
+
+    all_series = hindi_series + english_series
+    print(f"Loaded {len(all_series)} series to scrape.")
+
+    out_dir = Path("output")
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    driver = make_driver(headless=args.headless)
+    driver = make_driver(headless=True) # running headless for speed
     try:
-        # gather series title
-        driver.get(args.list_url)
-        WebDriverWait(driver, 10).until(lambda d: d.execute_script('return document.readyState') == 'complete')
-        try:
-            series_title = driver.find_element(By.CSS_SELECTOR, 'h1').text.strip()
-        except Exception:
-            series_title = ''
+        for series in all_series:
+            title = series["title"]
+            series_url = series["url"]
+            start_ep = series.get("start_episode")
+            end_ep = series.get("end_episode")
 
-        links = find_chapter_links(driver, args.list_url)
-        # remove asset links like direct mp3s
-        links = filter_out_assets(links)
-        print(f'Found {len(links)} candidate chapter links')
-        if args.limit and args.limit > 0:
-            links = links[: args.limit]
 
-        chapters: List[Dict] = []
-        for i, l in enumerate(links, 1):
-            print(f'[{i}/{len(links)}] Visiting {l}')
-            try:
-                item = extract_chapter(driver, l)
-                chapters.append(item)
-            except Exception as e:
-                print('Error extracting', l, e)
+            slug = series_url.rstrip('/').split('/')[-1]
+            out_path = out_dir / f"{slug}.json"
+            if out_path.exists():
+                print(f"Skipping already scraped: {title}")
+                continue
 
-        # save per-discourse JSON
-        save_discourse_json(series_title or args.list_url, args.list_url, chapters, out_dir)
+            print(f"Processing series: {title}")
+
+            if not start_ep or not end_ep:
+                print(f"Skipping {title} because of missing start/end episode.")
+                continue
+
+            # Generate chapter links
+            slug = series_url.rstrip('/').split('/')[-1]
+            prefix = re.sub(r'-by-.*$', '', slug)
+            prefix = re.sub(r'-\d+-\d+$', '', prefix) # remove chapter range
+            base_url = '/'.join(series_url.split('/')[:-1])
+
+            links = [f"{base_url}/{prefix}-{i}" for i in range(start_ep, end_ep + 1)]
+
+            print(f'Found {len(links)} candidate chapter links')
+
+            chapters: List[Dict] = []
+            for i, l in enumerate(links, 1):
+                print(f'[{i}/{len(links)}] Visiting {l}')
+                try:
+                    item = extract_chapter(driver, l)
+                    chapters.append(item)
+                except Exception as e:
+                    print('Error extracting', l, e)
+
+            # save per-discourse JSON
+            save_discourse_json(title, series_url, chapters, out_dir)
     finally:
         driver.quit()
 
