@@ -268,8 +268,9 @@ def extract_chapter(driver, url: str, discourse_name: str = "") -> Dict:
     transcript_lines = []
     soup = BeautifulSoup(html, 'html.parser')
 
-    # 1. FIXED BLACKLIST
+    # 1. FIXED BLACKLIST - Updated with your new list
     BANNED_PHRASES = {
+        # Original Junk
         "Home", "OSHO", "About Osho", "Osho Biography", "Osho on Mystic", 
         "Osho Photo Gallery", "Osho Dham", "Upcoming Events", "Meditation Programs",
         "Meditation", "Active Meditation", "Passive Meditation", "Discourses",
@@ -279,7 +280,24 @@ def extract_chapter(driver, url: str, discourse_name: str = "") -> Dict:
         "Login", "Share", "Whatsapp", "Facebook", "Instagram", "X", "Gmail",
         "Pinterest", "Copied !", "Language :", "Download", "UP NEXT", "Previous",
         "Next", "Related", "Menu", "Search", "0", "/", "#", "english", "hindi",
-        "Description", "ZEN AND ZEN MASTERS", "Zen and Zen Masters"
+        "Description", "ZEN AND ZEN MASTERS", "Zen and Zen Masters",
+
+        # New Junk from Request
+        "Play Audio", "Contact Us", 
+        "Osho Dham, Osho Dhyan Mandir, 44, Jhatikra Road, Pandwala Khurd,",
+        "Near Najafgarh, New Delhi - 110043", "+91-9971992227, 9717490340",
+        "contact@oshoworld.com", "How to reach Oshodham", "Who is Osho", 
+        "Biography", "Osho On Mystic", "Other Centres", "Documentaries", 
+        "Call of the Master", "Hindi Audio Discourse", "English Audio Discourse", 
+        "Search Book Archive", "Meditation Books", "About Oshodham", "Getting Here",
+        "Upcoming Event", "Osho Active Meditations", "Osho Passive Meditations",
+        "Osho Whiterobe", "Osho Mystic Rose", "Osho No-mind", "Osho Born Again",
+        "Osho Vipassana", "Osho Zazen", "Children Meditation Camp", 
+        "Vigyan Bhairav Tantra", "Audios", "Videos", "Osho Books", "Audio", 
+        "Osho Photos", "Magazine Subscription", "Osho Arts", "Osho Gifts", 
+        "others", "Osho Centres", "Privacy Policy", "Cookie policy", 
+        "Terms and Conditions", "Shipping & Delivery Policy", "Return Policy", 
+        "Cancellation Policy", "Follow Us :"
     }
 
     # 2. Find Content
