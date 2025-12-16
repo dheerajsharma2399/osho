@@ -284,11 +284,25 @@ def extract_chapter(driver, url: str) -> Dict:
         duration = m.group(0)
         print(f"[PID {os.getpid()}]   └─ Duration: {duration}")
 
-    # EXTRACTION PHASE 5: Transcript (no waiting, parsing already-loaded HTML with BeautifulSoup)
+   # EXTRACTION PHASE 5: Transcript (Smart Filters)
     print(f"[PID {os.getpid()}] 📄 Extracting transcript...")
-    transcript_paragraphs = []
+    transcript_lines = []
     soup = BeautifulSoup(html, 'html.parser')
 
+    # 1. EXPANDED BLACKLIST (Exact matches to ignore)
+    BANNED_PHRASES = {
+        "Home", "OSHO", "About Osho", "Osho Biography", "Osho on Mystic", 
+        "Osho Photo Gallery", "Osho Dham", "Upcoming Events", "Meditation Programs",
+        "Meditation", "Active Meditation", "Passive Meditation", "Discourses",
+        "Hindi Audio Discourses", "English Audio Discourses", "Hindi E-Books",
+        "English E-Books", "Search Archive", "Video", "News & Media", "News",
+        "Osho Art News", "Shop", "Pearls", "Music", "Magazine", "Tarot", "FAQ",
+        "Login", "Share", "Whatsapp", "Facebook", "Instagram", "X", "Gmail",
+        "Pinterest", "Copied !", "Language :", "Download", "UP NEXT", "Previous",
+        "Next", "Related", "Menu", "Search", "0", "/", "#", "english", "hindi"
+    }
+
+    # 2. Find the Content Container
     content_selectors = [
         '.entry-content', '.post-content', '.td-post-content', '.tdb-block-inner',
         'article', '.main-content', '#content', '#main'
@@ -300,31 +314,72 @@ def extract_chapter(driver, url: str) -> Dict:
         if content_element:
             print(f"[PID {os.getpid()}]   └─ Found content with selector: {selector}")
             break
+    
+    if not content_element:
+        print(f"[PID {os.getpid()}]   └─ Using fallback body extraction")
+        content_element = soup.body
 
     if content_element:
-        for unwanted_tag in content_element(['script', 'style', 'noscript', 'img', 'audio', 'video']):
-            unwanted_tag.decompose()
+        # 3. Structural Cleaning (Remove navigation, sidebars, playlists)
+        for tag in content_element(['script', 'style', 'noscript', 'nav', 'aside', 'header', 'footer', 'iframe', 'form', 'button', 'input']):
+            tag.decompose()
 
-        for p in content_element.find_all(['p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li']):
-            text = p.get_text(separator=' ', strip=True)
-            if text and len(text) > 30 and "OSHO" not in text and "Copyright" not in text:
-                transcript_paragraphs.append(text)
-    else:
-        print(f"[PID {os.getpid()}]   └─ Using fallback body text extraction")
-        body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ''
-        lines = body_text.split('\n')
-        transcript_paragraphs = [line.strip() for line in lines if len(line.strip()) > 50 and "OSHO" not in line and "Copyright" not in line]
+        # Remove playlist/download/widget containers specifically
+        garbage_selectors = [
+            '.share', '.social', '.widget', '.sidebar', '.related-posts', 
+            '.navigation', '.meta', '.tags', '.playlist', '.tracklist', 
+            '.audio-playlist', '.wp-playlist', '.jp-playlist'
+        ]
+        for garbage in garbage_selectors:
+            for junk in content_element.select(garbage):
+                junk.decompose()
 
-    # Remove duplicates while preserving order
+        # 4. Extract Text
+        raw_text = content_element.get_text(separator='\n', strip=True)
+        
+        # 5. SMART FILTERING
+        lines = raw_text.split('\n')
+        for line in lines:
+            clean_line = line.strip()
+            
+            # Skip empty
+            if not clean_line:
+                continue
+                
+            # A. Check Blacklist
+            if clean_line in BANNED_PHRASES:
+                continue
+            
+            # B. Check Timestamps (e.g. 01:54:11, 00:00:00)
+            # This regex matches strict time formats
+            if re.match(r'^\d{2}:\d{2}:\d{2}$', clean_line) or re.match(r'^\d{2}:\d{2}$', clean_line):
+                continue
+
+            # C. Check Copyright / Generic Metadata
+            if "Copyright" in clean_line and "Osho" in clean_line:
+                continue
+            
+            # D. Check for "Playlist" style repetition
+            # If the line contains the main Title (e.g. "Bodhidharma") AND a digit (e.g. "01"), it's likely a playlist link
+            # But we must be careful not to delete "Question 1"
+            if title and len(title) > 5 and title.lower() in clean_line.lower():
+                 # It mentions the book title. Is it a chapter listing?
+                 # If it ends with a number (like "Title 01", "Title 02"), ignore it.
+                 if re.search(r'\d{2}$', clean_line): 
+                     continue
+
+            # If we survived all filters, accept it.
+            transcript_lines.append(clean_line)
+
+    # Remove duplicates
     seen = set()
-    transcript_paragraphs = [p for p in transcript_paragraphs if p and not (p in seen or seen.add(p))]
-    
-    # Check if transcript is meaningful
-    if len(transcript_paragraphs) == 0:
+    transcript_paragraphs = [x for x in transcript_lines if not (x in seen or seen.add(x))]
+
+    if transcript_paragraphs:
+        print(f"[PID {os.getpid()}]   └─ ✓ Extracted {len(transcript_paragraphs)} lines")
+    else:
         print(f"[PID {os.getpid()}]   └─ ⚠ Warning: No transcript found for {url}")
         transcript_paragraphs = None
-    else:
-        print(f"[PID {os.getpid()}]   └─ ✓ Extracted {len(transcript_paragraphs)} paragraphs")
 
     chapter = {
         'title': title,
