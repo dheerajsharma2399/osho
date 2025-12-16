@@ -23,14 +23,20 @@ from bs4 import BeautifulSoup
 # Adjust these values to calibrate the scraper for your network/site speed
 # ═══════════════════════════════════════════════════════════════════════
 
-WAIT_DOCUMENT_READY = 2        # Time to wait for document.readyState = 'complete'
+# ULTRA-FAST MODE for static websites (set to 0 to disable waits)
+WAIT_DOCUMENT_READY = 0          # Time to wait for document.readyState = 'complete' (0 = skip)
 WAIT_COOKIE_POPUP = 1            # Time to wait for cookie consent popup
-WAIT_DYNAMIC_CONTENT = 1         # Static delay for JavaScript-rendered content
-WAIT_CONTENT_ELEMENT = 2        # Time to wait for main content container
-WAIT_RETRY_DELAY = 2             # Delay before retrying after failure
-PAGE_LOAD_TIMEOUT = 30           # Maximum time for page navigation
-SCRIPT_TIMEOUT = 30              # Maximum time for JavaScript execution
-MAX_RETRIES = 3                  # Number of retry attempts per URL
+WAIT_DYNAMIC_CONTENT = 0         # Static delay for JavaScript-rendered content (0 = skip)
+WAIT_CONTENT_ELEMENT = 0         # Time to wait for main content container (0 = skip)
+WAIT_RETRY_DELAY = 1             # Delay before retrying after failure
+PAGE_LOAD_TIMEOUT = 15           # Maximum time for page navigation
+SCRIPT_TIMEOUT = 10              # Maximum time for JavaScript execution
+MAX_RETRIES = 2                  # Number of retry attempts per URL
+
+# Performance optimizations
+ENABLE_IMAGES = False            # Load images (disable for speed)
+ENABLE_CSS = False               # Load CSS (disable for speed)
+ENABLE_JAVASCRIPT = True         # Load JavaScript (needed for some sites)
 
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -60,22 +66,57 @@ def make_driver(chromedriver_path):
     print(f"[PID {pid}] Creating Chrome driver instance...")
     
     options = webdriver.ChromeOptions()
-    # Uncomment to run headless
-    # options.add_argument("--headless=new")
+    
+    # ULTRA-FAST MODE: Enable headless
+    options.add_argument("--headless=new")
+    
+    # Performance optimizations
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1200,900")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option('useAutomationExtension', False)
+    
+    # Aggressive performance settings
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-plugins")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-web-security")
+    options.add_argument("--disable-features=VizDisplayCompositor")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-background-timer-throttling")
+    options.add_argument("--disable-backgrounding-occluded-windows")
+    options.add_argument("--disable-renderer-backgrounding")
+    options.add_argument("--disable-sync")
+    options.add_argument("--metrics-recording-only")
+    options.add_argument("--mute-audio")
+    options.add_argument("--no-proxy-server")
+    options.add_argument("--dns-prefetch-disable")
+    
+    # Minimal window size for speed
+    options.add_argument("--window-size=800,600")
+    
+    # Disable images/CSS/JS based on config
+    prefs = {
+        "profile.managed_default_content_settings.images": 2 if not ENABLE_IMAGES else 1,
+        "profile.managed_default_content_settings.stylesheets": 2 if not ENABLE_CSS else 1,
+        "profile.managed_default_content_settings.javascript": 1 if ENABLE_JAVASCRIPT else 2,
+    }
+    options.add_experimental_option("prefs", prefs)
+    
+    # Set page load strategy to 'none' for maximum speed
+    # This doesn't wait for page load to complete
+    options.page_load_strategy = 'none'
     
     try:
         service = Service(chromedriver_path)
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
         driver.set_script_timeout(SCRIPT_TIMEOUT)
-        print(f"[PID {pid}] ✓ Chrome driver created successfully")
+        print(f"[PID {pid}] ✓ Chrome driver created successfully (ULTRA-FAST MODE)")
         return driver
     except Exception as e:
         print(f"[PID {pid}] ✗ Failed to create Chrome driver: {e}")
@@ -83,62 +124,71 @@ def make_driver(chromedriver_path):
 
 
 def accept_cookies(driver):
+    """Handle cookie popup - optimized for speed"""
     try:
         accept_button = WebDriverWait(driver, WAIT_COOKIE_POPUP).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept')]" ))
         )
         accept_button.click()
-        time.sleep(1)
+        time.sleep(0.3)  # Minimal wait after clicking
     except Exception:
-        pass # ignore if not found
+        pass  # ignore if not found
 
 
 def extract_chapter(driver, url: str) -> Dict:
-    """Extract chapter content from URL"""
+    """Extract chapter content from URL - ULTRA-FAST MODE"""
     for attempt in range(MAX_RETRIES):
         try:
             print(f"[PID {os.getpid()}] Loading URL (attempt {attempt + 1}/{MAX_RETRIES}): {url}")
             
-            # WAIT POINT 1: Navigate to URL and wait for page to load
+            # WAIT POINT 1: Navigate to URL
             driver.get(url)
             
-            # WAIT POINT 2: Wait for document ready state
-            print(f"[PID {os.getpid()}] ⏳ Waiting for document ready (timeout: {WAIT_DOCUMENT_READY}s)...")
-            WebDriverWait(driver, WAIT_DOCUMENT_READY).until(
-                lambda d: d.execute_script('return document.readyState') == 'complete'
-            )
+            # WAIT POINT 2: Wait for document ready state (OPTIONAL - skip if 0)
+            if WAIT_DOCUMENT_READY > 0:
+                print(f"[PID {os.getpid()}] ⏳ Waiting for document ready ({WAIT_DOCUMENT_READY}s)...")
+                WebDriverWait(driver, WAIT_DOCUMENT_READY).until(
+                    lambda d: d.execute_script('return document.readyState') == 'complete'
+                )
+            else:
+                # For static sites, just wait for body to exist (much faster)
+                WebDriverWait(driver, 3).until(
+                    EC.presence_of_element_located((By.TAG_NAME, "body"))
+                )
             
-            # WAIT POINT 3: Handle cookie consent
-            accept_cookies(driver)
+            # WAIT POINT 3: Handle cookie consent (only on first chapter)
+            if attempt == 0:  # Only try on first attempt
+                accept_cookies(driver)
             
-            # WAIT POINT 4: Additional static wait for dynamic content
+            # WAIT POINT 4: Additional static wait (OPTIONAL - skip if 0)
             if WAIT_DYNAMIC_CONTENT > 0:
                 print(f"[PID {os.getpid()}] ⏳ Waiting for dynamic content ({WAIT_DYNAMIC_CONTENT}s)...")
                 time.sleep(WAIT_DYNAMIC_CONTENT)
 
-            # WAIT POINT 5: Wait for main content elements
-            content_selectors_for_wait = [
-                (By.CSS_SELECTOR, '.entry-content'),
-                (By.CSS_SELECTOR, '.post-content'),
-                (By.CSS_SELECTOR, 'article'),
-                (By.ID, 'content'),
-                (By.ID, 'main')
-            ]
-            
-            waited_for_content = False
-            for selector_type, selector_value in content_selectors_for_wait:
-                try:
-                    WebDriverWait(driver, WAIT_CONTENT_ELEMENT).until(
-                        EC.presence_of_element_located((selector_type, selector_value))
-                    )
-                    waited_for_content = True
-                    print(f"[PID {os.getpid()}] ✓ Content element found: {selector_value}")
-                    break
-                except TimeoutException:
-                    continue
-                    
-            if not waited_for_content:
-                print(f"[PID {os.getpid()}] ⚠ Warning: No content element found for {url}")
+            # WAIT POINT 5: Wait for main content elements (OPTIONAL - skip if 0)
+            if WAIT_CONTENT_ELEMENT > 0:
+                content_selectors_for_wait = [
+                    (By.CSS_SELECTOR, '.entry-content'),
+                    (By.CSS_SELECTOR, '.post-content'),
+                    (By.CSS_SELECTOR, 'article'),
+                    (By.ID, 'content'),
+                    (By.ID, 'main')
+                ]
+                
+                waited_for_content = False
+                for selector_type, selector_value in content_selectors_for_wait:
+                    try:
+                        WebDriverWait(driver, WAIT_CONTENT_ELEMENT).until(
+                            EC.presence_of_element_located((selector_type, selector_value))
+                        )
+                        waited_for_content = True
+                        print(f"[PID {os.getpid()}] ✓ Content element found: {selector_value}")
+                        break
+                    except TimeoutException:
+                        continue
+                        
+                if not waited_for_content:
+                    print(f"[PID {os.getpid()}] ⚠ Warning: No content element found for {url}")
             
             # Now safe to extract HTML - all waits completed
             html = driver.page_source
@@ -372,15 +422,19 @@ def main(count, workers):
     print("\n" + "="*80)
     print("🔧 SCRAPER CONFIGURATION")
     print("="*80)
-    print(f"WAIT_DOCUMENT_READY     : {WAIT_DOCUMENT_READY}s")
+    print(f"MODE                    : {'🚀 ULTRA-FAST (Static Sites)' if WAIT_DOCUMENT_READY == 0 else 'Normal'}")
+    print(f"WAIT_DOCUMENT_READY     : {WAIT_DOCUMENT_READY}s {'(SKIPPED)' if WAIT_DOCUMENT_READY == 0 else ''}")
     print(f"WAIT_COOKIE_POPUP       : {WAIT_COOKIE_POPUP}s")
-    print(f"WAIT_DYNAMIC_CONTENT    : {WAIT_DYNAMIC_CONTENT}s")
-    print(f"WAIT_CONTENT_ELEMENT    : {WAIT_CONTENT_ELEMENT}s")
+    print(f"WAIT_DYNAMIC_CONTENT    : {WAIT_DYNAMIC_CONTENT}s {'(SKIPPED)' if WAIT_DYNAMIC_CONTENT == 0 else ''}")
+    print(f"WAIT_CONTENT_ELEMENT    : {WAIT_CONTENT_ELEMENT}s {'(SKIPPED)' if WAIT_CONTENT_ELEMENT == 0 else ''}")
     print(f"WAIT_RETRY_DELAY        : {WAIT_RETRY_DELAY}s")
     print(f"PAGE_LOAD_TIMEOUT       : {PAGE_LOAD_TIMEOUT}s")
     print(f"SCRIPT_TIMEOUT          : {SCRIPT_TIMEOUT}s")
     print(f"MAX_RETRIES             : {MAX_RETRIES}")
     print(f"WORKERS                 : {workers}")
+    print(f"ENABLE_IMAGES           : {ENABLE_IMAGES}")
+    print(f"ENABLE_CSS              : {ENABLE_CSS}")
+    print(f"ENABLE_JAVASCRIPT       : {ENABLE_JAVASCRIPT}")
     print("="*80 + "\n")
     
     # Initialize ChromeDriver once before spawning processes
