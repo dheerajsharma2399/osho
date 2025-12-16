@@ -18,6 +18,23 @@ from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
 
 
+# ═══════════════════════════════════════════════════════════════════════
+# CONFIGURABLE WAIT TIMES (in seconds)
+# Adjust these values to calibrate the scraper for your network/site speed
+# ═══════════════════════════════════════════════════════════════════════
+
+WAIT_DOCUMENT_READY = 2        # Time to wait for document.readyState = 'complete'
+WAIT_COOKIE_POPUP = 1            # Time to wait for cookie consent popup
+WAIT_DYNAMIC_CONTENT = 1         # Static delay for JavaScript-rendered content
+WAIT_CONTENT_ELEMENT = 2        # Time to wait for main content container
+WAIT_RETRY_DELAY = 2             # Delay before retrying after failure
+PAGE_LOAD_TIMEOUT = 30           # Maximum time for page navigation
+SCRIPT_TIMEOUT = 30              # Maximum time for JavaScript execution
+MAX_RETRIES = 3                  # Number of retry attempts per URL
+
+# ═══════════════════════════════════════════════════════════════════════
+
+
 PROGRESS_FILE = "progress.json"
 CHROMEDRIVER_PATH = None  # Will be set once in main
 
@@ -56,8 +73,8 @@ def make_driver(chromedriver_path):
     try:
         service = Service(chromedriver_path)
         driver = webdriver.Chrome(service=service, options=options)
-        driver.set_page_load_timeout(60)
-        driver.set_script_timeout(60)
+        driver.set_page_load_timeout(PAGE_LOAD_TIMEOUT)
+        driver.set_script_timeout(SCRIPT_TIMEOUT)
         print(f"[PID {pid}] ✓ Chrome driver created successfully")
         return driver
     except Exception as e:
@@ -67,7 +84,7 @@ def make_driver(chromedriver_path):
 
 def accept_cookies(driver):
     try:
-        accept_button = WebDriverWait(driver, 5).until(
+        accept_button = WebDriverWait(driver, WAIT_COOKIE_POPUP).until(
             EC.element_to_be_clickable((By.XPATH, "//button[contains(text(), 'Accept')]" ))
         )
         accept_button.click()
@@ -78,20 +95,28 @@ def accept_cookies(driver):
 
 def extract_chapter(driver, url: str) -> Dict:
     """Extract chapter content from URL"""
-    max_retries = 3
-    for attempt in range(max_retries):
+    for attempt in range(MAX_RETRIES):
         try:
-            print(f"[PID {os.getpid()}] Loading URL (attempt {attempt + 1}/{max_retries}): {url}")
+            print(f"[PID {os.getpid()}] Loading URL (attempt {attempt + 1}/{MAX_RETRIES}): {url}")
+            
+            # WAIT POINT 1: Navigate to URL and wait for page to load
             driver.get(url)
             
-            # Wait for page to load
-            WebDriverWait(driver, 20).until(
+            # WAIT POINT 2: Wait for document ready state
+            print(f"[PID {os.getpid()}] ⏳ Waiting for document ready (timeout: {WAIT_DOCUMENT_READY}s)...")
+            WebDriverWait(driver, WAIT_DOCUMENT_READY).until(
                 lambda d: d.execute_script('return document.readyState') == 'complete'
             )
+            
+            # WAIT POINT 3: Handle cookie consent
             accept_cookies(driver)
-            time.sleep(1)
+            
+            # WAIT POINT 4: Additional static wait for dynamic content
+            if WAIT_DYNAMIC_CONTENT > 0:
+                print(f"[PID {os.getpid()}] ⏳ Waiting for dynamic content ({WAIT_DYNAMIC_CONTENT}s)...")
+                time.sleep(WAIT_DYNAMIC_CONTENT)
 
-            # Wait for content
+            # WAIT POINT 5: Wait for main content elements
             content_selectors_for_wait = [
                 (By.CSS_SELECTOR, '.entry-content'),
                 (By.CSS_SELECTOR, '.post-content'),
@@ -103,33 +128,43 @@ def extract_chapter(driver, url: str) -> Dict:
             waited_for_content = False
             for selector_type, selector_value in content_selectors_for_wait:
                 try:
-                    WebDriverWait(driver, 10).until(
+                    WebDriverWait(driver, WAIT_CONTENT_ELEMENT).until(
                         EC.presence_of_element_located((selector_type, selector_value))
                     )
                     waited_for_content = True
+                    print(f"[PID {os.getpid()}] ✓ Content element found: {selector_value}")
                     break
                 except TimeoutException:
                     continue
                     
             if not waited_for_content:
-                print(f"[PID {os.getpid()}] Warning: No content element found for {url}")
+                print(f"[PID {os.getpid()}] ⚠ Warning: No content element found for {url}")
             
+            # Now safe to extract HTML - all waits completed
             html = driver.page_source
             break  # Success, exit retry loop
             
         except TimeoutException as e:
-            print(f"[PID {os.getpid()}] Timeout on attempt {attempt + 1}: {e}")
-            if attempt == max_retries - 1:
+            print(f"[PID {os.getpid()}] ⏱ Timeout on attempt {attempt + 1}: {e}")
+            if attempt == MAX_RETRIES - 1:
                 raise
-            time.sleep(2)
+            # WAIT POINT 6: Retry delay
+            print(f"[PID {os.getpid()}] ⏳ Retrying in {WAIT_RETRY_DELAY}s...")
+            time.sleep(WAIT_RETRY_DELAY)
         except Exception as e:
-            print(f"[PID {os.getpid()}] Error on attempt {attempt + 1}: {e}")
-            if attempt == max_retries - 1:
+            print(f"[PID {os.getpid()}] ❌ Error on attempt {attempt + 1}: {e}")
+            if attempt == MAX_RETRIES - 1:
                 raise
-            time.sleep(2)
+            # WAIT POINT 7: Retry delay
+            print(f"[PID {os.getpid()}] ⏳ Retrying in {WAIT_RETRY_DELAY}s...")
+            time.sleep(WAIT_RETRY_DELAY)
 
-    # Title: try multiple fallbacks
-    print(f"[PID {os.getpid()}] Extracting title...")
+    # ═══════════════════════════════════════════════════════════════════
+    # ALL WAITING IS COMPLETE - NOW EXTRACTING DATA FROM LOADED PAGE
+    # ═══════════════════════════════════════════════════════════════════
+    
+    # EXTRACTION PHASE 1: Title extraction (no waiting, immediate extraction)
+    print(f"[PID {os.getpid()}] 📝 Extracting title...")
     title = ''
     try:
         for sel in ('h1.entry-title', 'h1.post-title', 'h1.page-title', 'h1'):
@@ -149,9 +184,10 @@ def extract_chapter(driver, url: str) -> Dict:
             title = (og.get_attribute('content') or '').strip()
         except Exception:
             title = (driver.title or '').strip()
-    print(f"[PID {os.getpid()}] Title: {title[:50]}...")
+    print(f"[PID {os.getpid()}]   └─ Title: {title[:50]}...")
 
-    # MP3 links
+    # EXTRACTION PHASE 2: MP3 links (no waiting, immediate extraction)
+    print(f"[PID {os.getpid()}] 🎵 Extracting MP3 links...")
     mp3_links: List[str] = []
     try:
         anchors_mp3 = driver.find_elements(By.CSS_SELECTOR, 'a[href$=".mp3"]')
@@ -169,8 +205,10 @@ def extract_chapter(driver, url: str) -> Dict:
                 mp3_links.append(src)
     except Exception:
         pass
+    print(f"[PID {os.getpid()}]   └─ Found {len(mp3_links)} MP3 link(s)")
 
-    # Image url
+    # EXTRACTION PHASE 3: Image URL (no waiting, immediate extraction)
+    print(f"[PID {os.getpid()}] 🖼️  Extracting image URL...")
     image_url = ''
     try:
         og = driver.find_element(By.CSS_SELECTOR, 'meta[property="og:image"]')
@@ -185,15 +223,19 @@ def extract_chapter(driver, url: str) -> Dict:
                     break
         except Exception:
             image_url = ''
+    if image_url:
+        print(f"[PID {os.getpid()}]   └─ Image URL found")
 
-    # Duration
+    # EXTRACTION PHASE 4: Duration (no waiting, regex on already-loaded HTML)
+    print(f"[PID {os.getpid()}] ⏱️  Extracting duration...")
     duration = ''
     m = re.search(r'\b\d{1,2}:\d{2}:\d{2}\b', html)
     if m:
         duration = m.group(0)
+        print(f"[PID {os.getpid()}]   └─ Duration: {duration}")
 
-    # Transcript
-    print(f"[PID {os.getpid()}] Extracting transcript...")
+    # EXTRACTION PHASE 5: Transcript (no waiting, parsing already-loaded HTML with BeautifulSoup)
+    print(f"[PID {os.getpid()}] 📄 Extracting transcript...")
     transcript_paragraphs = []
     soup = BeautifulSoup(html, 'html.parser')
 
@@ -206,7 +248,7 @@ def extract_chapter(driver, url: str) -> Dict:
     for selector in content_selectors:
         content_element = soup.select_one(selector)
         if content_element:
-            print(f"[PID {os.getpid()}] Found content with selector: {selector}")
+            print(f"[PID {os.getpid()}]   └─ Found content with selector: {selector}")
             break
 
     if content_element:
@@ -218,13 +260,21 @@ def extract_chapter(driver, url: str) -> Dict:
             if text and len(text) > 30 and "OSHO" not in text and "Copyright" not in text:
                 transcript_paragraphs.append(text)
     else:
-        print(f"[PID {os.getpid()}] Using fallback body text extraction")
+        print(f"[PID {os.getpid()}]   └─ Using fallback body text extraction")
         body_text = soup.body.get_text(separator='\n', strip=True) if soup.body else ''
         lines = body_text.split('\n')
         transcript_paragraphs = [line.strip() for line in lines if len(line.strip()) > 50 and "OSHO" not in line and "Copyright" not in line]
 
-    transcript_paragraphs = [p for p in transcript_paragraphs if p]
-    print(f"[PID {os.getpid()}] Extracted {len(transcript_paragraphs)} paragraphs")
+    # Remove duplicates while preserving order
+    seen = set()
+    transcript_paragraphs = [p for p in transcript_paragraphs if p and not (p in seen or seen.add(p))]
+    
+    # Check if transcript is meaningful
+    if len(transcript_paragraphs) == 0:
+        print(f"[PID {os.getpid()}]   └─ ⚠ Warning: No transcript found for {url}")
+        transcript_paragraphs = None
+    else:
+        print(f"[PID {os.getpid()}]   └─ ✓ Extracted {len(transcript_paragraphs)} paragraphs")
 
     chapter = {
         'title': title,
@@ -232,7 +282,7 @@ def extract_chapter(driver, url: str) -> Dict:
         'mp3_links': list(dict.fromkeys(mp3_links)),
         'image_url': image_url,
         'duration': duration,
-        'transcript': transcript_paragraphs,
+        'transcript': transcript_paragraphs,  # Will be None if no transcript found
     }
     return chapter
 
@@ -245,9 +295,9 @@ def process_chapter(chapter_task):
     pid = os.getpid()
     
     start_time = time.time()
-    print(f"\n{'='*60}")
+    print(f"\n{'='*80}")
     print(f"[PID {pid}] 🚀 Starting chapter {chapter_id} ({discourse_name})")
-    print(f"{'='*60}")
+    print(f"{'='*80}")
 
     driver = None
     try:
@@ -283,12 +333,21 @@ def save_discourse_data(discourse_index, discourse, chapters_data):
     """Save completed discourse data to file"""
     discourse_id = f"{discourse_index + 1:03}"
     
+    # Count chapters with and without transcripts
+    chapters_with_transcript = sum(1 for ch in chapters_data if ch.get('transcript'))
+    chapters_without_transcript = sum(1 for ch in chapters_data if not ch.get('transcript'))
+    
     discourse_data = {
         "id": discourse_id,
         "discourse_name": discourse["discourse_name"],
         "discourse_url": discourse["discourse_url"],
         "language": discourse["language"],
         "chapters": chapters_data,
+        "stats": {
+            "total_chapters": len(chapters_data),
+            "chapters_with_transcript": chapters_with_transcript,
+            "chapters_without_transcript": chapters_without_transcript
+        }
     }
 
     # Sanitize the filename
@@ -299,18 +358,38 @@ def save_discourse_data(discourse_index, discourse, chapters_data):
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(discourse_data, f, ensure_ascii=False, indent=2)
 
-    print(f"✓ Successfully saved discourse {discourse_id} to {output_file}")
+    print(f"\n{'='*80}")
+    print(f"✅ Successfully saved discourse {discourse_id} to {output_file}")
+    print(f"   📊 Transcript Coverage: {chapters_with_transcript}/{len(chapters_data)} chapters")
+    if chapters_without_transcript > 0:
+        print(f"   ⚠️  Missing Transcripts: {chapters_without_transcript} chapters")
+    print(f"{'='*80}\n")
+    
     return discourse["discourse_url"]
 
 
 def main(count, workers):
+    print("\n" + "="*80)
+    print("🔧 SCRAPER CONFIGURATION")
+    print("="*80)
+    print(f"WAIT_DOCUMENT_READY     : {WAIT_DOCUMENT_READY}s")
+    print(f"WAIT_COOKIE_POPUP       : {WAIT_COOKIE_POPUP}s")
+    print(f"WAIT_DYNAMIC_CONTENT    : {WAIT_DYNAMIC_CONTENT}s")
+    print(f"WAIT_CONTENT_ELEMENT    : {WAIT_CONTENT_ELEMENT}s")
+    print(f"WAIT_RETRY_DELAY        : {WAIT_RETRY_DELAY}s")
+    print(f"PAGE_LOAD_TIMEOUT       : {PAGE_LOAD_TIMEOUT}s")
+    print(f"SCRIPT_TIMEOUT          : {SCRIPT_TIMEOUT}s")
+    print(f"MAX_RETRIES             : {MAX_RETRIES}")
+    print(f"WORKERS                 : {workers}")
+    print("="*80 + "\n")
+    
     # Initialize ChromeDriver once before spawning processes
     print("Initializing ChromeDriver...")
     try:
         chromedriver_path = ChromeDriverManager().install()
-        print(f"✓ ChromeDriver ready at: {chromedriver_path}")
+        print(f"✅ ChromeDriver ready at: {chromedriver_path}\n")
     except Exception as e:
-        print(f"✗ Failed to initialize ChromeDriver: {e}")
+        print(f"❌ Failed to initialize ChromeDriver: {e}")
         return
     
     with open("chapter_links.json", "r", encoding="utf-8") as f:
@@ -332,10 +411,10 @@ def main(count, workers):
         discourses_to_process = discourses_to_process[:count]
 
     if not discourses_to_process:
-        print("All discourses have been processed.")
+        print("✅ All discourses have been processed.")
         return
 
-    # Create a list of all chapter tasks (now including chromedriver_path)
+    # Create a list of all chapter tasks
     chapter_tasks = []
     for discourse_index, discourse in discourses_to_process:
         for chapter_index, chapter_url in enumerate(discourse["chapter_links"]):
@@ -344,11 +423,16 @@ def main(count, workers):
                 discourse["discourse_name"],
                 chapter_index,
                 chapter_url,
-                chromedriver_path  # Pass the driver path to each task
+                chromedriver_path
             ))
 
-    print(f"\nStarting ProcessPoolExecutor with {workers} workers.")
-    print(f"Processing {len(discourses_to_process)} discourses ({len(chapter_tasks)} chapters total)...\n")
+    print(f"\n{'='*80}")
+    print(f"📋 SCRAPING SUMMARY")
+    print(f"{'='*80}")
+    print(f"Discourses to process: {len(discourses_to_process)}")
+    print(f"Total chapters       : {len(chapter_tasks)}")
+    print(f"Parallel workers     : {workers}")
+    print(f"{'='*80}\n")
     
     # Process all chapters in parallel
     chapter_results = []
@@ -356,14 +440,17 @@ def main(count, workers):
         with ProcessPoolExecutor(max_workers=workers) as executor:
             chapter_results = list(executor.map(process_chapter, chapter_tasks))
     except KeyboardInterrupt:
-        print("\n\n⚠ Interrupted by user. Saving progress...")
+        print("\n\n⚠️  Interrupted by user. Saving progress...")
     except Exception as e:
-        print(f"\n\n✗ Error during processing: {e}")
+        print(f"\n\n❌ Error during processing: {e}")
         import traceback
         traceback.print_exc()
     
     # Group results by discourse and save
-    print("\n\nGrouping chapters and saving discourses...")
+    print("\n\n" + "="*80)
+    print("📦 GROUPING AND SAVING RESULTS")
+    print("="*80 + "\n")
+    
     discourse_chapters = {}
     for chapter_data in chapter_results:
         if chapter_data:
@@ -374,10 +461,19 @@ def main(count, workers):
     
     # Save each discourse
     saved_count = 0
+    total_chapters_with_transcript = 0
+    total_chapters_without_transcript = 0
+    
     for discourse_index, discourse in discourses_to_process:
         if discourse_index in discourse_chapters:
             # Sort chapters by chapter_index
             chapters = sorted(discourse_chapters[discourse_index], key=lambda x: x["chapter_index"])
+            
+            # Count transcript stats
+            with_transcript = sum(1 for ch in chapters if ch.get('transcript'))
+            without_transcript = sum(1 for ch in chapters if not ch.get('transcript'))
+            total_chapters_with_transcript += with_transcript
+            total_chapters_without_transcript += without_transcript
             
             # Remove temporary fields
             for ch in chapters:
@@ -389,15 +485,32 @@ def main(count, workers):
             save_progress(list(completed_discourses))
             saved_count += 1
         else:
-            print(f"⚠ No chapters found for discourse {discourse_index + 1}: {discourse['discourse_name']}")
+            print(f"⚠️  No chapters found for discourse {discourse_index + 1}: {discourse['discourse_name']}")
 
     successful_chapters = len([r for r in chapter_results if r is not None])
-    print(f"\n✓ Completed: {saved_count}/{len(discourses_to_process)} discourses, {successful_chapters}/{len(chapter_tasks)} chapters")
+    
+    print("\n" + "="*80)
+    print("🎉 FINAL SUMMARY")
+    print("="*80)
+    print(f"Discourses saved     : {saved_count}/{len(discourses_to_process)}")
+    print(f"Chapters scraped     : {successful_chapters}/{len(chapter_tasks)}")
+    print(f"With transcripts     : {total_chapters_with_transcript}")
+    print(f"Without transcripts  : {total_chapters_without_transcript}")
+    if successful_chapters > 0:
+        coverage = (total_chapters_with_transcript / successful_chapters) * 100
+        print(f"Transcript coverage  : {coverage:.1f}%")
+    print("="*80 + "\n")
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Scrape OSHO discourses.")
-    parser.add_argument("--count", type=int, default=None, help="Number of discourses to process.")
-    parser.add_argument("--workers", type=int, default=1, help="Number of concurrent workers (Chrome instances).")
+    parser = argparse.ArgumentParser(
+        description="Scrape OSHO discourses with configurable wait times.",
+        epilog="Adjust wait times by modifying the constants at the top of the script."
+    )
+    parser.add_argument("--count", type=int, default=None, 
+                       help="Number of discourses to process.")
+    parser.add_argument("--workers", type=int, default=1, 
+                       help="Number of concurrent workers (Chrome instances).")
     args = parser.parse_args()
+    
     main(count=args.count, workers=args.workers)
