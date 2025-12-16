@@ -6,7 +6,7 @@ from typing import List, Dict, Optional
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 import os
-import atexit
+import difflib  # Added for fuzzy string matching
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -220,7 +220,21 @@ def extract_chapter(driver, url: str, discourse_name: str = "") -> Dict:
     if m:
         duration = m.group(0)
 
-    # 5. Transcript
+    # 5. Tags (New Universal Method)
+    tags = []
+    try:
+        # Strategy: Look for any link with '/tag/' or '/category/' in the href
+        # This is the most reliable way for WordPress sites.
+        tag_elements = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/tag/"], a[href*="/category/"], a[rel="tag"]')
+        for t in tag_elements:
+            txt = t.get_attribute("textContent").strip()
+            # Basic validation to avoid "View all tags" links or icons
+            if txt and len(txt) < 50 and txt not in tags:
+                tags.append(txt)
+    except Exception:
+        pass
+
+    # 6. Transcript
     transcript_lines = []
     soup = BeautifulSoup(html, 'html.parser')
 
@@ -300,28 +314,42 @@ def extract_chapter(driver, url: str, discourse_name: str = "") -> Dict:
             if not clean_line:
                 continue
             
-            # Check Blacklist
+            # 1. Blacklist Check
             if clean_line in BANNED_PHRASES:
                 continue
             
-            # Check Discourse Name repetition
+            # 2. Discourse Name Filter (Exact Regex)
             if name_pattern and name_pattern.match(clean_line):
                 continue
             
-            # Check Timestamps
+            # 3. FUZZY SIMILARITY CHECK (NEW)
+            # This detects lines like "From Unconciousness to Conscious 02" 
+            # even if there are typos or slight differences from 'discourse_name'.
+            if discourse_name and len(clean_line) < 100:
+                # Calculate similarity ratio
+                similarity = difflib.SequenceMatcher(None, clean_line.lower(), discourse_name.lower()).ratio()
+                
+                # If highly similar (> 0.7) AND ends in a number, it's a playlist item
+                if similarity > 0.7 and re.search(r'\d+$', clean_line):
+                    continue
+                    
+                # If extremely similar (> 0.9), it's just the title repeated
+                if similarity > 0.9:
+                    continue
+
+            # 4. Timestamps
             if re.match(r'^\d{2}:\d{2}:\d{2}$', clean_line) or re.match(r'^\d{2}:\d{2}$', clean_line):
                 continue
 
-            # Check for Dates (e.g. December 19th, 2025)
-            # Matches Month DDth, YYYY or similar formats
+            # 5. Date Garbage (e.g. December 19th, 2025)
             if re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(st|nd|rd|th)?,?\s+\d{4}', clean_line, re.IGNORECASE):
                 continue
 
-            # Check Copyright
+            # 6. Copyright
             if "Copyright" in clean_line and "Osho" in clean_line:
                 continue
             
-            # Check ALL CAPS short headers (Sidebar junk)
+            # 7. Sidebar Headers
             if len(clean_line) < 50 and clean_line.isupper() and not clean_line.endswith(('.', '?', '!')):
                 continue
 
@@ -330,87 +358,37 @@ def extract_chapter(driver, url: str, discourse_name: str = "") -> Dict:
     seen = set()
     transcript_paragraphs = [x for x in transcript_lines if not (x in seen or seen.add(x))]
 
-    # CRITICAL CHECK: If title is "Osho World", we hit the homepage (redirect error).
-    # Force transcript to None so we can try a URL variant in process_chapter
+    # URL MISMATCH CHECK
     if title.strip().lower() == "osho world":
         transcript_paragraphs = None
 
     if not transcript_paragraphs:
         transcript_paragraphs = None
-    # ═══════════════════════════════════════════════════════════════════
-    # EXTRACTION PHASE 6: TAGS (Universal Method)
-    # ═══════════════════════════════════════════════════════════════════
-    print(f"[PID {os.getpid()}] 🏷️  Extracting tags...")
-    tags = []
-    
-    try:
-        # Method 1: The "rel=tag" standard (Works on 99% of WordPress sites)
-        # This finds ANY link that the website explicitly marks as a "tag" or "category"
-        tag_elements = driver.find_elements(By.CSS_SELECTOR, 'a[rel="tag"], a[rel="category tag"]')
-        
-        for t in tag_elements:
-            txt = t.get_attribute("textContent").strip() # textContent is more reliable than .text
-            if txt and txt not in tags:
-                tags.append(txt)
-                
-    except Exception:
-        pass
 
-    # Method 2: Fallback for specific theme classes if Method 1 fails
-    if not tags:
-        try:
-            selectors = [
-                '.td-tags a',           # Newspaper Theme (Common on Osho sites)
-                '.entry-tags a',        # Standard WordPress
-                '.tag-links a',         # Standard WordPress
-                '.post-tags a',         # Common variation
-                '.taxonomy-category a'  # Categories acting as tags
-            ]
-            
-            for sel in selectors:
-                elements = driver.find_elements(By.CSS_SELECTOR, sel)
-                for t in elements:
-                    txt = t.get_attribute("textContent").strip()
-                    if txt and txt not in tags:
-                        tags.append(txt)
-                if tags: break # Stop if we found tags in this selector
-        except Exception:
-            pass
-            
-    print(f"[PID {os.getpid()}]   └─ Found {len(tags)} tags")
     chapter = {
         'title': title,
         'url': url,
         'mp3_links': list(dict.fromkeys(mp3_links)),
         'image_url': image_url,
         'duration': duration,
-        'tags': tags,   # <--- ADD THIS LINE
+        'tags': tags,
         'transcript': transcript_paragraphs,
     }
     return chapter
 
 
 def generate_url_variants(url):
-    """Generate potential URL fixes (e.g. vol-04 -> vol-4)"""
+    """Generate potential URL fixes"""
     variants = []
-    
-    # CASE 1: Remove leading zero (vol-04 -> vol-4)
-    # This addresses the issue where site uses 'vol-4' but we generated 'vol-04'
     if re.search(r'vol-0\d', url):
         variants.append(re.sub(r'vol-0(\d)', r'vol-\1', url))
-        
-    # CASE 2: Add leading zero (vol-4 -> vol-04) - just in case
     elif re.search(r'vol-\d-', url) or re.search(r'vol-\d$', url):
         variants.append(re.sub(r'vol-(\d)', r'vol-0\1', url))
-        
     return variants
 
 
 def process_chapter(chapter_task):
-    """
-    Process a single chapter. 
-    INCLUDES AUTO-RETRY LOGIC FOR URL MISMATCHES.
-    """
+    """Process a single chapter with Auto-Retry for URL mismatches"""
     discourse_index, discourse_name, chapter_index, chapter_url, chromedriver_path = chapter_task
     discourse_id = f"{discourse_index + 1:03}"
     chapter_id = f"{discourse_id}{chapter_index + 1:03}"
@@ -425,18 +403,15 @@ def process_chapter(chapter_task):
         # ATTEMPT 1: Original URL
         chapter_details = extract_chapter(driver, chapter_url, discourse_name)
         
-        # CHECK FOR FAILURE (Redirected to Home Page "Osho World" or Empty Transcript)
+        # CHECK FOR FAILURE
         if chapter_details['title'].strip().lower() == "osho world" or not chapter_details['transcript']:
             print(f"[PID {pid}] ⚠️  Possible URL mismatch (Redirected to Home). Trying variants...")
-            
-            # Generate variants (e.g., vol-04 -> vol-4)
             variants = generate_url_variants(chapter_url)
             
             for variant_url in variants:
                 print(f"[PID {pid}] 🔄 Retrying with: {variant_url}")
                 retry_details = extract_chapter(driver, variant_url, discourse_name)
                 
-                # If retry worked (Title is NOT Osho World AND we got text), use it
                 if retry_details['title'].strip().lower() != "osho world" and retry_details['transcript']:
                     print(f"[PID {pid}] ✅ Variant worked!")
                     chapter_details = retry_details
@@ -490,7 +465,7 @@ def save_discourse_data(discourse_index, discourse, chapters_data):
 
 def main(count, workers):
     print("\n" + "="*80)
-    print("🔧 SCRAPER CONFIGURATION (AUTO-URL FIXER ENABLED)")
+    print("🔧 SCRAPER CONFIGURATION")
     print("="*80)
     print(f"WORKERS                 : {workers}")
     print("="*80 + "\n")
